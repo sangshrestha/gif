@@ -79,6 +79,7 @@ int main(int argc, char** argv)
   header.ScreenWidth = read_word(file);
   header.ScreenHeight = read_word(file);
 
+  // TODO: keep packed as a byte
   char packed = read_byte(file);
   header.packed.SizeOfGlobalColourTable = (packed >> 5) & 0x07;
   header.packed.ColourTableSortFlag = (packed >> 4) & 0x01;
@@ -151,8 +152,9 @@ int main(int argc, char** argv)
 
     BYTE b = read_byte(file);
 
+    // IMAGE DATA
     while (b != 0) {
-      // skip sub-blocks
+      // TODO: decode image data
       for (int i = 0; i < b; i++) {
         read_byte(file);
       }
