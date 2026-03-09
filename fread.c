@@ -15,6 +15,7 @@ typedef unsigned int WORD;
 
 BYTE read_byte(FILE *file);
 WORD read_word(FILE *file);
+void peek_chars(FILE *file, int n);
 
 struct Packed
 {
@@ -81,10 +82,10 @@ int main(int argc, char** argv)
 
   // TODO: keep packed as a byte
   char packed = read_byte(file);
-  header.packed.SizeOfGlobalColourTable = (packed >> 5) & 0x07;
-  header.packed.ColourTableSortFlag = (packed >> 4) & 0x01;
-  header.packed.ColourResolution = (packed >> 1) & 0x07;
-  header.packed.GlobalColourTableFlag = packed & 0x01;
+  header.packed.SizeOfGlobalColourTable =  packed & 0x07;
+  header.packed.ColourTableSortFlag = (packed >> 3) & 0x01;
+  header.packed.ColourResolution = (packed >> 4) & 0x07;
+  header.packed.GlobalColourTableFlag = (packed >> 7) & 0x01;
 
   header.BackgroundColour = read_byte(file);
   header.AspectRatio = read_byte(file);
@@ -115,9 +116,39 @@ int main(int argc, char** argv)
     }
   }
 
-  // TODO: extension block
-  while (read_byte(file) != SEPARATOR) {
-    //
+
+  // TODO: refactor this in a function
+  while (read_byte(file) == EXTENSION) {
+    switch (read_byte(file)) {
+      case APPLICATION_LABEL:
+        // just skipping the bytes for now
+        char identifier[8];
+        char authentcode[3];
+        read_byte(file); // blocksize
+        fread_s(identifier, 8, 1, 8, file); // identifier
+        fread_s(authentcode, 3, 1, 3, file); // authentcode
+
+        // Sub-block
+        BYTE b = read_byte(file);
+        while (b != 0) {
+          // TODO: decode image data
+          for (int i = 0; i < b; i++) {
+            read_byte(file);
+          }
+
+          b = read_byte(file);
+        }
+        break;
+
+      case GRAPHICS_CONTROL_LABEL:
+        // just skipping the bytes for now
+        read_byte(file); // blocksize
+        read_byte(file); // packed
+        read_word(file); // delaytime
+        read_byte(file); // colorindex
+        read_byte(file); // terminator
+        break;
+    }
   }
 
   struct Image images[256]; // TODO: assuming 256 frames based on 1MB gif size and 64x64 pixels
@@ -175,7 +206,7 @@ int main(int argc, char** argv)
           read_byte(file); // colorindex
           read_byte(file); // terminator
           break;
-        // TODO: more cases
+          // TODO: more cases
       }
 
       b = read_byte(file);
@@ -211,4 +242,11 @@ BYTE read_byte(FILE *file)
 WORD read_word(FILE *file)
 {
   return (read_byte(file) | (read_byte(file) << 8));
+}
+
+void peek_chars(FILE *file, int n)
+{
+  for (int i = 0; i < n; i++) {
+    printf("%x ", read_byte(file));
+  }
 }
