@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <math.h>
 
 #define SignatureLength 3
 #define VersionLength 3
@@ -9,6 +8,7 @@
 #define GRAPHICS_CONTROL_LABEL 0xF9
 #define PLAIN_TEXT_LABEL 0x01
 #define APPLICATION_LABEL 0xFF
+#define COMMENT_LABEL 0xFE
 
 typedef unsigned char BYTE;
 typedef unsigned int WORD;
@@ -16,24 +16,18 @@ typedef unsigned int WORD;
 BYTE read_byte(FILE *file);
 WORD read_word(FILE *file);
 void peek_chars(FILE *file, int n);
-
-struct Packed
-{
-  int SizeOfGlobalColourTable;
-  int ColourTableSortFlag;
-  int ColourResolution;
-  int GlobalColourTableFlag;
-};
+void read_n_bytes(FILE *file, unsigned char *dest, int size);
+int binary(int n);
 
 struct Header
 {
-  BYTE Signature[SignatureLength+1];
-  BYTE Version[VersionLength+1];
+  BYTE Signature[SignatureLength];
+  BYTE Version[VersionLength];
 
   WORD ScreenWidth;
   WORD ScreenHeight;
 
-  struct Packed packed;
+  BYTE Packed;
   BYTE BackgroundColour;
   BYTE AspectRatio;
 };
@@ -74,48 +68,34 @@ int main(int argc, char** argv)
   }
 
   struct Header header = {0};
-
-  fread_s(header.Signature, sizeof(header.Signature), 1, SignatureLength, file);
-  fread_s(header.Version, sizeof(header.Version), 1, VersionLength, file);
+  read_n_bytes(file, header.Signature, sizeof(header.Signature));
+  read_n_bytes(file, header.Version, sizeof(header.Version));
   header.ScreenWidth = read_word(file);
   header.ScreenHeight = read_word(file);
-
-  // TODO: keep packed as a byte
-  char packed = read_byte(file);
-  header.packed.SizeOfGlobalColourTable =  packed & 0x07;
-  header.packed.ColourTableSortFlag = (packed >> 3) & 0x01;
-  header.packed.ColourResolution = (packed >> 4) & 0x07;
-  header.packed.GlobalColourTableFlag = (packed >> 7) & 0x01;
-
+  header.Packed = read_byte(file);
   header.BackgroundColour = read_byte(file);
   header.AspectRatio = read_byte(file);
 
-  printf("Signature: %s\n", header.Signature);
-  printf("Version: %s\n", header.Version);
-  printf("ScreenWidth: %d\n", header.ScreenWidth);
-  printf("ScreenHeight: %d\n", header.ScreenHeight);
-  printf("\nPACKED:\n");
-  printf("SizeOfGlobalColourTable: %d\n", header.packed.SizeOfGlobalColourTable);
-  printf("ColourTableSortFlag: %d\n", header.packed.ColourTableSortFlag);
-  printf("ColourResolution: %d\n", header.packed.ColourResolution);
-  printf("GlobalColourTableFlag: %d\n", header.packed.GlobalColourTableFlag);
-  printf("\n");
-  printf("BackgroundColour: %d\n", header.BackgroundColour);
-  printf("AspectRatio: %d\n", header.AspectRatio);
+  printf("Signature: %c%c%c", header.Signature[0], header.Signature[1], header.Signature[2]);
+  printf(" | Version: %c%c%c", header.Version[0], header.Version[1], header.Version[2]);
+  printf(" | ScreenWidth: %d", header.ScreenWidth);
+  printf(" | ScreenHeight: %d", header.ScreenHeight);
+  printf(" | Packed: %.8d", binary(header.Packed));
+  printf(" | BackgroundColour: %d", header.BackgroundColour);
+  printf(" | AspectRatio: %d\n", header.AspectRatio);
 
-  int global_colour_table_count = 1L << (header.packed.SizeOfGlobalColourTable + 1);
+  int global_colour_table_count = 1L << ((header.Packed  & 0x07) + 1);
   struct ColourTable global_colour_table[global_colour_table_count];
-  printf("\nGLOBAL COLOUR TABLE:\n");
+
+  printf("\nGLOBAL COLOUR TABLE: ");
   for (int i = 0; i < global_colour_table_count; i++) {
     global_colour_table[i].Red = read_byte(file);
     global_colour_table[i].Green = read_byte(file);
     global_colour_table[i].Blue = read_byte(file);
 
-    if (i < 3 || i > global_colour_table_count - 3) {
-      printf("%.3d: #%.2X%.2X%.2X\n", i, global_colour_table[i].Red, global_colour_table[i].Green, global_colour_table[i].Blue);
-    }
+      printf("#%.2X%.2X%.2X ", global_colour_table[i].Red, global_colour_table[i].Green, global_colour_table[i].Blue);
   }
-
+  printf("\n");
 
   // TODO: refactor this in a function
   while (read_byte(file) == EXTENSION) {
@@ -140,6 +120,19 @@ int main(int argc, char** argv)
         }
         break;
 
+      case COMMENT_LABEL:
+        // Sub-block
+        BYTE c = read_byte(file);
+        while (c != 0) {
+          // TODO: decode image data
+          for (int i = 0; i < c; i++) {
+            read_byte(file);
+          }
+
+          c = read_byte(file);
+        }
+        break;
+
       case GRAPHICS_CONTROL_LABEL:
         // just skipping the bytes for now
         read_byte(file); // blocksize
@@ -154,7 +147,7 @@ int main(int argc, char** argv)
   struct Image images[256]; // TODO: assuming 256 frames based on 1MB gif size and 64x64 pixels
   int image_count = 0;
 
-  printf("\nLOCAL IMAGE DESCRIPTORS:\n");
+  printf("\nLOCAL IMAGE DESCRIPTORS:");
   while (image_count > -1) {
     images[image_count].Left = read_word(file);
     images[image_count].Top = read_word(file);
@@ -162,12 +155,13 @@ int main(int argc, char** argv)
     images[image_count].Height = read_word(file);
     images[image_count].Packed = read_byte(file);
 
-    printf("Frame #%.3d: left = %d, top = %d, width = %d, height = %d, packed = %o\n", image_count, images[image_count].Left, images[image_count].Top, images[image_count].Width, images[image_count].Height, images[image_count].Packed);
+    printf("\nFrame #%.3d: left = %.3d, top = %.3d, width = %.3d, height = %.3d, packed = %.8d",
+      image_count, images[image_count].Left, images[image_count].Top, images[image_count].Width, images[image_count].Height, binary(images[image_count].Packed));
 
-    if (images[image_count].Packed & 0x128) {
+    if ((images[image_count].Packed >> 7) & 0x1) {
       int local_colour_table_count = 1L << ((images[image_count].Packed & 0x07) + 1);
 
-      printf("LOCAL COLOUR TABLE:\n");
+      printf("\nLOCAL COLOUR TABLE:\n");
       for (int i = 0; i < local_colour_table_count; i++) {
         images[image_count].LocalColourTable[i].Red = read_byte(file);
         images[image_count].LocalColourTable[i].Green = read_byte(file);
@@ -181,7 +175,7 @@ int main(int argc, char** argv)
 
     images[image_count].LZWMinimumCodeSize = read_byte(file);
 
-    BYTE b = read_byte(file);
+    BYTE b = read_byte(file); // count byte
 
     // IMAGE DATA
     while (b != 0) {
@@ -206,7 +200,6 @@ int main(int argc, char** argv)
           read_byte(file); // colorindex
           read_byte(file); // terminator
           break;
-          // TODO: more cases
       }
 
       b = read_byte(file);
@@ -220,15 +213,8 @@ int main(int argc, char** argv)
     }
   }
 
-  // printf("\npeek chars: ");
-  // for (int i = 0; i < 8; i++) {
-  //   char c = read_byte(file);
-  //   printf("%x ", c);
-  // }
-  // printf("\n");
-
   fclose(file);
-  printf("file closed\n");
+  printf("\nfile closed\n");
   return 0;
 }
 
@@ -244,9 +230,34 @@ WORD read_word(FILE *file)
   return (read_byte(file) | (read_byte(file) << 8));
 }
 
+void read_n_bytes(FILE *file, unsigned char *dest, int size)
+{
+  for (int i = 0; i < size; i++) {
+    dest[i] = read_byte(file);
+  }
+}
+
 void peek_chars(FILE *file, int n)
 {
   for (int i = 0; i < n; i++) {
     printf("%x ", read_byte(file));
   }
+}
+
+// note that this isnt actually binary value
+// i am representing what the binary looks like with an actual integer
+int binary(int n)
+{
+  int b = 0;
+  int power10 = 10000000;
+
+  for (int i = 7; i >= 0; i--) {
+    if ((n / (1 << i)) == 1) {
+      b = b + power10;
+      n = n - (1 << i);
+    }
+    power10 = power10 / 10;
+  }
+
+  return b;
 }
