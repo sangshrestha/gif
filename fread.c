@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 #define SignatureLength 3
 #define VersionLength 3
@@ -14,7 +15,9 @@ typedef unsigned char BYTE;
 typedef unsigned int WORD;
 
 BYTE read_byte(FILE *file);
+BYTE skip_byte(FILE *file);
 WORD read_word(FILE *file);
+WORD skip_word(FILE *file);
 void peek_chars(FILE *file, int n);
 void read_n_bytes(FILE *file, unsigned char *dest, int size);
 int binary(int n);
@@ -50,6 +53,9 @@ struct Image
   BYTE LZWMinimumCodeSize;
 };
 
+int bytes_count = 0;
+unsigned char *gif;
+
 int main(int argc, char** argv)
 {
   if (argc < 2) {
@@ -66,6 +72,8 @@ int main(int argc, char** argv)
     printf("fopen_s error: %d\n", fopen_err);
     return fopen_err;
   }
+
+  gif = malloc(300000);
 
   struct Header header = {0};
   read_n_bytes(file, header.Signature, sizeof(header.Signature));
@@ -93,7 +101,7 @@ int main(int argc, char** argv)
     global_colour_table[i].Green = read_byte(file);
     global_colour_table[i].Blue = read_byte(file);
 
-      printf("#%.2X%.2X%.2X ", global_colour_table[i].Red, global_colour_table[i].Green, global_colour_table[i].Blue);
+    printf("#%.2X%.2X%.2X ", global_colour_table[i].Red, global_colour_table[i].Green, global_colour_table[i].Blue);
   }
   printf("\n");
 
@@ -102,11 +110,11 @@ int main(int argc, char** argv)
     switch (read_byte(file)) {
       case APPLICATION_LABEL:
         // just skipping the bytes for now
-        char identifier[8];
-        char authentcode[3];
+        unsigned char identifier[8];
+        unsigned char authentcode[3];
         read_byte(file); // blocksize
-        fread_s(identifier, 8, 1, 8, file); // identifier
-        fread_s(authentcode, 3, 1, 3, file); // authentcode
+        read_n_bytes(file, identifier, 8); // identifier
+        read_n_bytes(file, authentcode, 3); // authentcode
 
         // Sub-block
         BYTE b = read_byte(file);
@@ -149,60 +157,71 @@ int main(int argc, char** argv)
 
   printf("\nLOCAL IMAGE DESCRIPTORS:");
   while (image_count > -1) {
-    images[image_count].Left = read_word(file);
-    images[image_count].Top = read_word(file);
-    images[image_count].Width = read_word(file);
-    images[image_count].Height = read_word(file);
-    images[image_count].Packed = read_byte(file);
+    WORD (*act_word)(FILE *file);
+    BYTE (*act_byte)(FILE *file);
+
+    if (image_count % 2 == 0) {
+      act_word = read_word;
+      act_byte = read_byte;
+    }
+    else {
+      act_word = skip_word;
+      act_byte = skip_byte;
+    }
+
+    images[image_count].Left = act_word(file);
+    images[image_count].Top = act_word(file);
+    images[image_count].Width = act_word(file);
+    images[image_count].Height = act_word(file);
+    images[image_count].Packed = act_byte(file);
 
     printf("\nFrame #%.3d: left = %.3d, top = %.3d, width = %.3d, height = %.3d, packed = %.8d",
-      image_count, images[image_count].Left, images[image_count].Top, images[image_count].Width, images[image_count].Height, binary(images[image_count].Packed));
+        image_count, images[image_count].Left, images[image_count].Top, images[image_count].Width, images[image_count].Height, binary(images[image_count].Packed));
 
     if ((images[image_count].Packed >> 7) & 0x1) {
       int local_colour_table_count = 1L << ((images[image_count].Packed & 0x07) + 1);
 
       printf("\nLOCAL COLOUR TABLE:\n");
       for (int i = 0; i < local_colour_table_count; i++) {
-        images[image_count].LocalColourTable[i].Red = read_byte(file);
-        images[image_count].LocalColourTable[i].Green = read_byte(file);
-        images[image_count].LocalColourTable[i].Blue = read_byte(file);
+        images[image_count].LocalColourTable[i].Red = act_byte(file);
+        images[image_count].LocalColourTable[i].Green = act_byte(file);
+        images[image_count].LocalColourTable[i].Blue = act_byte(file);
 
         if (i < 3 || i > local_colour_table_count - 3) {
           printf("%d: %d %d %d\n", i, images[image_count].LocalColourTable[i].Red, images[image_count].LocalColourTable[i].Green, images[image_count].LocalColourTable[i].Blue);
         }
-      }
-    }
+      } }
 
-    images[image_count].LZWMinimumCodeSize = read_byte(file);
+    images[image_count].LZWMinimumCodeSize = act_byte(file);
 
-    BYTE b = read_byte(file); // count byte
+    BYTE b = act_byte(file); // count byte
 
     // IMAGE DATA
     while (b != 0) {
       // TODO: decode image data
       for (int i = 0; i < b; i++) {
-        read_byte(file);
+        act_byte(file);
       }
 
-      b = read_byte(file);
+      b = act_byte(file);
     }
-    b = read_byte(file); // skip 0
+    b = act_byte(file); // skip 0
 
     while (b == EXTENSION) {
-      BYTE extension_label = read_byte(file);
+      BYTE extension_label = act_byte(file);
 
       switch (extension_label) {
         case GRAPHICS_CONTROL_LABEL:
           // just skipping the bytes for now
-          read_byte(file); // blocksize
-          read_byte(file); // packed
-          read_word(file); // delaytime
-          read_byte(file); // colorindex
-          read_byte(file); // terminator
+          act_byte(file); // blocksize
+          act_byte(file); // packed
+          act_word(file); // delaytime
+          act_byte(file); // colorindex
+          act_byte(file); // terminator
           break;
       }
 
-      b = read_byte(file);
+      b = act_byte(file);
     }
 
     if (b == SEPARATOR) {
@@ -214,11 +233,29 @@ int main(int argc, char** argv)
   }
 
   fclose(file);
+
+  FILE *copy;
+  errno_t copy_err;
+
+  copy_err = fopen_s(&copy, "copy.gif", "wb");
+  fwrite(gif, 1, bytes_count, copy);
+  fclose(copy);
+  free(gif);
+  printf("bytes count: %d\n", bytes_count);
   printf("\nfile closed\n");
   return 0;
 }
 
 BYTE read_byte(FILE *file)
+{
+  BYTE tmp;
+  fread_s(&tmp, 1, 1, 1, file);
+  gif[bytes_count] = tmp;
+  bytes_count++;
+  return tmp;
+}
+
+BYTE skip_byte(FILE *file)
 {
   BYTE tmp;
   fread_s(&tmp, 1, 1, 1, file);
@@ -228,6 +265,11 @@ BYTE read_byte(FILE *file)
 WORD read_word(FILE *file)
 {
   return (read_byte(file) | (read_byte(file) << 8));
+}
+
+WORD skip_word(FILE *file)
+{
+  return (skip_byte(file) | (skip_byte(file) << 8));
 }
 
 void read_n_bytes(FILE *file, unsigned char *dest, int size)
