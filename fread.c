@@ -20,6 +20,8 @@ WORD read_word(FILE *file);
 WORD skip_word(FILE *file);
 void peek_chars(FILE *file, int n);
 void read_n_bytes(FILE *file, unsigned char *dest, int size);
+void skip_n_bytes(FILE *file, unsigned char *dest, int size);
+void read_extension(FILE *file);
 int binary(int n);
 
 struct Header
@@ -54,7 +56,7 @@ struct Image
 };
 
 int bytes_count = 0;
-unsigned char *gif;
+BYTE *gif;
 
 int main(int argc, char** argv)
 {
@@ -73,6 +75,7 @@ int main(int argc, char** argv)
     return fopen_err;
   }
 
+  // TODO: malloc dynamic
   gif = malloc(300000);
 
   struct Header header = {0};
@@ -105,68 +108,25 @@ int main(int argc, char** argv)
   }
   printf("\n");
 
-  // TODO: refactor this in a function
-  while (read_byte(file) == EXTENSION) {
-    switch (read_byte(file)) {
-      case APPLICATION_LABEL:
-        // just skipping the bytes for now
-        unsigned char identifier[8];
-        unsigned char authentcode[3];
-        read_byte(file); // blocksize
-        read_n_bytes(file, identifier, 8); // identifier
-        read_n_bytes(file, authentcode, 3); // authentcode
-
-        // Sub-block
-        BYTE b = read_byte(file);
-        while (b != 0) {
-          // TODO: decode image data
-          for (int i = 0; i < b; i++) {
-            read_byte(file);
-          }
-
-          b = read_byte(file);
-        }
-        break;
-
-      case COMMENT_LABEL:
-        // Sub-block
-        BYTE c = read_byte(file);
-        while (c != 0) {
-          // TODO: decode image data
-          for (int i = 0; i < c; i++) {
-            read_byte(file);
-          }
-
-          c = read_byte(file);
-        }
-        break;
-
-      case GRAPHICS_CONTROL_LABEL:
-        // just skipping the bytes for now
-        read_byte(file); // blocksize
-        read_byte(file); // packed
-        read_word(file); // delaytime
-        read_byte(file); // colorindex
-        read_byte(file); // terminator
-        break;
-    }
-  }
+  read_extension(file);
 
   struct Image images[256]; // TODO: assuming 256 frames based on 1MB gif size and 64x64 pixels
   int image_count = 0;
 
-  printf("\nLOCAL IMAGE DESCRIPTORS:");
   while (image_count > -1) {
     WORD (*act_word)(FILE *file);
     BYTE (*act_byte)(FILE *file);
+    void (*act_n_bytes)(FILE *file, unsigned char *dest, int size);
 
     if (image_count % 2 == 0) {
       act_word = read_word;
       act_byte = read_byte;
+      act_n_bytes = read_n_bytes;
     }
     else {
       act_word = skip_word;
       act_byte = skip_byte;
+      act_n_bytes = skip_n_bytes;
     }
 
     images[image_count].Left = act_word(file);
@@ -181,16 +141,18 @@ int main(int argc, char** argv)
     if ((images[image_count].Packed >> 7) & 0x1) {
       int local_colour_table_count = 1L << ((images[image_count].Packed & 0x07) + 1);
 
-      printf("\nLOCAL COLOUR TABLE:\n");
+      printf("\nLOCAL COLOUR TABLE: ");
       for (int i = 0; i < local_colour_table_count; i++) {
         images[image_count].LocalColourTable[i].Red = act_byte(file);
         images[image_count].LocalColourTable[i].Green = act_byte(file);
         images[image_count].LocalColourTable[i].Blue = act_byte(file);
 
         if (i < 3 || i > local_colour_table_count - 3) {
-          printf("%d: %d %d %d\n", i, images[image_count].LocalColourTable[i].Red, images[image_count].LocalColourTable[i].Green, images[image_count].LocalColourTable[i].Blue);
+          printf("%d. #%.2X%.2X%.2X ", i, images[image_count].LocalColourTable[i].Red, images[image_count].LocalColourTable[i].Green, images[image_count].LocalColourTable[i].Blue);
         }
-      } }
+      }
+    }
+    printf("\n");
 
     images[image_count].LZWMinimumCodeSize = act_byte(file);
 
@@ -211,10 +173,42 @@ int main(int argc, char** argv)
       BYTE extension_label = act_byte(file);
 
       switch (extension_label) {
+        case APPLICATION_LABEL:
+          // just skipping the bytes for now
+          unsigned char identifier[8];
+          unsigned char authentcode[3];
+          act_byte(file); // blocksize
+          act_n_bytes(file, identifier, 8); // identifier
+          act_n_bytes(file, authentcode, 3); // authentcode
+
+          // Sub-block
+          BYTE b = act_byte(file);
+          while (b != 0) {
+            for (int i = 0; i < b; i++) {
+              act_byte(file);
+            }
+
+            b = act_byte(file);
+          }
+          break;
+
+        case COMMENT_LABEL:
+          // Sub-block
+          BYTE c = act_byte(file);
+          while (c != 0) {
+            for (int i = 0; i < c; i++) {
+              act_byte(file);
+            }
+
+            c = act_byte(file);
+          }
+          break;
+
         case GRAPHICS_CONTROL_LABEL:
           // just skipping the bytes for now
           act_byte(file); // blocksize
           act_byte(file); // packed
+          printf("gfx packed: %.8u\n", binary(gif[bytes_count-1]));
           act_word(file); // delaytime
           act_byte(file); // colorindex
           act_byte(file); // terminator
@@ -228,6 +222,7 @@ int main(int argc, char** argv)
       image_count++;
     }
     else {
+      gif[bytes_count - 1] = TRAILER; // in case we are not writing the last frame
       image_count = -1;
     }
   }
@@ -241,7 +236,7 @@ int main(int argc, char** argv)
   fwrite(gif, 1, bytes_count, copy);
   fclose(copy);
   free(gif);
-  printf("bytes count: %d\n", bytes_count);
+  printf("\nbytes count: %d\n", bytes_count);
   printf("\nfile closed\n");
   return 0;
 }
@@ -279,10 +274,65 @@ void read_n_bytes(FILE *file, unsigned char *dest, int size)
   }
 }
 
+void skip_n_bytes(FILE *file, unsigned char *dest, int size)
+{
+  for (int i = 0; i < size; i++) {
+    dest[i] = skip_byte(file);
+  }
+}
+
+
 void peek_chars(FILE *file, int n)
 {
   for (int i = 0; i < n; i++) {
     printf("%x ", read_byte(file));
+  }
+}
+
+void read_extension(FILE *file)
+{
+  while (read_byte(file) == EXTENSION) {
+    switch (read_byte(file)) {
+      case APPLICATION_LABEL:
+        // just skipping the bytes for now
+        unsigned char identifier[8];
+        unsigned char authentcode[3];
+        read_byte(file); // blocksize
+        read_n_bytes(file, identifier, 8); // identifier
+        read_n_bytes(file, authentcode, 3); // authentcode
+
+        // Sub-block
+        BYTE b = read_byte(file);
+        while (b != 0) {
+          for (int i = 0; i < b; i++) {
+            read_byte(file);
+          }
+
+          b = read_byte(file);
+        }
+        break;
+
+      case COMMENT_LABEL:
+        // Sub-block
+        BYTE c = read_byte(file);
+        while (c != 0) {
+          for (int i = 0; i < c; i++) {
+            read_byte(file);
+          }
+
+          c = read_byte(file);
+        }
+        break;
+
+      case GRAPHICS_CONTROL_LABEL:
+        // just skipping the bytes for now
+        read_byte(file); // blocksize
+        read_byte(file); // packed
+        read_word(file); // delaytime
+        read_byte(file); // colorindex
+        read_byte(file); // terminator
+        break;
+    }
   }
 }
 
