@@ -15,14 +15,34 @@ typedef unsigned char BYTE;
 typedef unsigned int WORD;
 
 BYTE read_byte(FILE *file);
-BYTE skip_byte(FILE *file);
 WORD read_word(FILE *file);
+void read_n_bytes(FILE *file, BYTE *dest, int size);
+BYTE skip_byte(FILE *file);
 WORD skip_word(FILE *file);
+void skip_n_bytes(FILE *file, BYTE *dest, int size);
 void peek_chars(FILE *file, int n);
-void read_n_bytes(FILE *file, unsigned char *dest, int size);
-void skip_n_bytes(FILE *file, unsigned char *dest, int size);
-void read_extension(FILE *file);
 int binary(int n);
+
+struct ColourTable
+{
+  BYTE Red;
+  BYTE Green;
+  BYTE Blue;
+};
+
+struct GIF
+{
+  BYTE Signature[SignatureLength];
+  BYTE Version[VersionLength];
+  WORD ScreenWidth;
+  WORD ScreenHeight;
+  BYTE Packed;
+  BYTE BackgroundColour;
+  BYTE AspectRatio;
+  struct ColourTable *GlobalColourTable;
+
+  // TODO: extension + image data
+};
 
 struct Header
 {
@@ -35,13 +55,6 @@ struct Header
   BYTE Packed;
   BYTE BackgroundColour;
   BYTE AspectRatio;
-};
-
-struct ColourTable
-{
-  BYTE Red;
-  BYTE Green;
-  BYTE Blue;
 };
 
 struct Image
@@ -106,17 +119,15 @@ int main(int argc, char** argv)
 
     printf("#%.2X%.2X%.2X ", global_colour_table[i].Red, global_colour_table[i].Green, global_colour_table[i].Blue);
   }
-  printf("\n");
-
-  read_extension(file);
+  printf("\n\n");
 
   struct Image images[256]; // TODO: assuming 256 frames based on 1MB gif size and 64x64 pixels
   int image_count = 0;
 
-  while (image_count > -1) {
+  while (1) {
     WORD (*act_word)(FILE *file);
     BYTE (*act_byte)(FILE *file);
-    void (*act_n_bytes)(FILE *file, unsigned char *dest, int size);
+    void (*act_n_bytes)(FILE *file, BYTE *dest, int size);
 
     if (image_count % 2 == 0) {
       act_word = read_word;
@@ -129,70 +140,19 @@ int main(int argc, char** argv)
       act_n_bytes = skip_n_bytes;
     }
 
-    images[image_count].Left = act_word(file);
-    images[image_count].Top = act_word(file);
-    images[image_count].Width = act_word(file);
-    images[image_count].Height = act_word(file);
-    images[image_count].Packed = act_byte(file);
-
-    printf("\nFrame #%.3d: left = %.3d, top = %.3d, width = %.3d, height = %.3d, packed = %.8d",
-        image_count, images[image_count].Left, images[image_count].Top, images[image_count].Width, images[image_count].Height, binary(images[image_count].Packed));
-
-    if ((images[image_count].Packed >> 7) & 0x1) {
-      int local_colour_table_count = 1L << ((images[image_count].Packed & 0x07) + 1);
-
-      printf("\nLOCAL COLOUR TABLE: ");
-      for (int i = 0; i < local_colour_table_count; i++) {
-        images[image_count].LocalColourTable[i].Red = act_byte(file);
-        images[image_count].LocalColourTable[i].Green = act_byte(file);
-        images[image_count].LocalColourTable[i].Blue = act_byte(file);
-
-        if (i < 3 || i > local_colour_table_count - 3) {
-          printf("%d. #%.2X%.2X%.2X ", i, images[image_count].LocalColourTable[i].Red, images[image_count].LocalColourTable[i].Green, images[image_count].LocalColourTable[i].Blue);
-        }
-      }
-    }
-    printf("\n");
-
-    images[image_count].LZWMinimumCodeSize = act_byte(file);
-
-    BYTE b = act_byte(file); // count byte
-
-    // IMAGE DATA
-    while (b != 0) {
-      // TODO: decode image data
-      for (int i = 0; i < b; i++) {
-        act_byte(file);
-      }
-
-      b = act_byte(file);
-    }
-    b = act_byte(file); // skip 0
-
-    while (b == EXTENSION) {
+    BYTE byte = act_byte(file);
+    while (byte == EXTENSION) {
       BYTE extension_label = act_byte(file);
 
       switch (extension_label) {
         case APPLICATION_LABEL:
           // just skipping the bytes for now
-          unsigned char identifier[8];
-          unsigned char authentcode[3];
+          BYTE identifier[8];
+          BYTE authentcode[3];
           act_byte(file); // blocksize
           act_n_bytes(file, identifier, 8); // identifier
           act_n_bytes(file, authentcode, 3); // authentcode
 
-          // Sub-block
-          BYTE b = act_byte(file);
-          while (b != 0) {
-            for (int i = 0; i < b; i++) {
-              act_byte(file);
-            }
-
-            b = act_byte(file);
-          }
-          break;
-
-        case COMMENT_LABEL:
           // Sub-block
           BYTE c = act_byte(file);
           while (c != 0) {
@@ -200,6 +160,17 @@ int main(int argc, char** argv)
               act_byte(file);
             }
 
+            c = act_byte(file);
+          }
+          break;
+
+        case COMMENT_LABEL:
+          // Sub-block
+          c = act_byte(file);
+          while (c != 0) {
+            for (int i = 0; i < c; i++) {
+              act_byte(file);
+            }
             c = act_byte(file);
           }
           break;
@@ -215,16 +186,52 @@ int main(int argc, char** argv)
           break;
       }
 
+      byte = act_byte(file);
+    }
+    
+    if (byte == TRAILER) {
+      break;
+    }
+
+    images[image_count].Left = act_word(file);
+    images[image_count].Top = act_word(file);
+    images[image_count].Width = act_word(file);
+    images[image_count].Height = act_word(file);
+    images[image_count].Packed = act_byte(file);
+
+    printf("Frame #%.3d: left = %.3d, top = %.3d, width = %.3d, height = %.3d, packed = %.8d\n",
+        image_count, images[image_count].Left, images[image_count].Top, images[image_count].Width, images[image_count].Height, binary(images[image_count].Packed));
+
+    if ((images[image_count].Packed >> 7) & 0x1) {
+      int local_colour_table_count = 1L << ((images[image_count].Packed & 0x07) + 1);
+
+      printf("LOCAL COLOUR TABLE: ");
+      for (int i = 0; i < local_colour_table_count; i++) {
+        images[image_count].LocalColourTable[i].Red = act_byte(file);
+        images[image_count].LocalColourTable[i].Green = act_byte(file);
+        images[image_count].LocalColourTable[i].Blue = act_byte(file);
+
+        if (i < 3 || i > local_colour_table_count - 3) {
+          printf("%d. #%.2X%.2X%.2X ", i, images[image_count].LocalColourTable[i].Red, images[image_count].LocalColourTable[i].Green, images[image_count].LocalColourTable[i].Blue);
+        }
+      }
+    }
+    printf("\n");
+
+    images[image_count].LZWMinimumCodeSize = act_byte(file);
+
+    // IMAGE DATA
+    BYTE b = act_byte(file); // count
+    while ( b != 0) {
+      // TODO: decode image data
+      for (int i = 0; i < b; i++) {
+        act_byte(file);
+      }
+
       b = act_byte(file);
     }
 
-    if (b == SEPARATOR) {
-      image_count++;
-    }
-    else {
-      gif[bytes_count - 1] = TRAILER; // in case we are not writing the last frame
-      image_count = -1;
-    }
+    image_count++;
   }
 
   fclose(file);
@@ -267,14 +274,14 @@ WORD skip_word(FILE *file)
   return (skip_byte(file) | (skip_byte(file) << 8));
 }
 
-void read_n_bytes(FILE *file, unsigned char *dest, int size)
+void read_n_bytes(FILE *file, BYTE *dest, int size)
 {
   for (int i = 0; i < size; i++) {
     dest[i] = read_byte(file);
   }
 }
 
-void skip_n_bytes(FILE *file, unsigned char *dest, int size)
+void skip_n_bytes(FILE *file, BYTE *dest, int size)
 {
   for (int i = 0; i < size; i++) {
     dest[i] = skip_byte(file);
@@ -286,53 +293,6 @@ void peek_chars(FILE *file, int n)
 {
   for (int i = 0; i < n; i++) {
     printf("%x ", read_byte(file));
-  }
-}
-
-void read_extension(FILE *file)
-{
-  while (read_byte(file) == EXTENSION) {
-    switch (read_byte(file)) {
-      case APPLICATION_LABEL:
-        // just skipping the bytes for now
-        unsigned char identifier[8];
-        unsigned char authentcode[3];
-        read_byte(file); // blocksize
-        read_n_bytes(file, identifier, 8); // identifier
-        read_n_bytes(file, authentcode, 3); // authentcode
-
-        // Sub-block
-        BYTE b = read_byte(file);
-        while (b != 0) {
-          for (int i = 0; i < b; i++) {
-            read_byte(file);
-          }
-
-          b = read_byte(file);
-        }
-        break;
-
-      case COMMENT_LABEL:
-        // Sub-block
-        BYTE c = read_byte(file);
-        while (c != 0) {
-          for (int i = 0; i < c; i++) {
-            read_byte(file);
-          }
-
-          c = read_byte(file);
-        }
-        break;
-
-      case GRAPHICS_CONTROL_LABEL:
-        // just skipping the bytes for now
-        read_byte(file); // blocksize
-        read_byte(file); // packed
-        read_word(file); // delaytime
-        read_byte(file); // colorindex
-        read_byte(file); // terminator
-        break;
-    }
   }
 }
 
