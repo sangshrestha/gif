@@ -14,6 +14,15 @@
 typedef unsigned char BYTE;
 typedef unsigned int WORD;
 
+BYTE read_byte(FILE *file);
+WORD read_word(FILE *file);
+void read_n_bytes(FILE *file, BYTE *dest, int size);
+BYTE skip_byte(FILE *file);
+WORD skip_word(FILE *file);
+void skip_n_bytes(FILE *file, BYTE *dest, int size);
+void peek_chars(FILE *file, int n);
+int binary(int n);
+
 struct ColourTable
 {
   BYTE Red;
@@ -33,8 +42,19 @@ struct GIF
   struct ColourTable *GlobalColourTable;
 
   // TODO: extension + image data
+};
 
-  int BytesCount;
+struct Header
+{
+  BYTE Signature[SignatureLength];
+  BYTE Version[VersionLength];
+
+  WORD ScreenWidth;
+  WORD ScreenHeight;
+
+  BYTE Packed;
+  BYTE BackgroundColour;
+  BYTE AspectRatio;
 };
 
 struct Image
@@ -48,17 +68,8 @@ struct Image
   BYTE LZWMinimumCodeSize;
 };
 
-BYTE read_byte(FILE *file, struct GIF *gif);
-WORD read_word(FILE *file, struct GIF *gif);
-void read_n_bytes(FILE *file, struct GIF *gif, BYTE *dest, int size);
-BYTE skip_byte(FILE *file, struct GIF *gif);
-WORD skip_word(FILE *file, struct GIF *gif);
-void skip_n_bytes(FILE *file, struct GIF *gif, BYTE *dest, int size);
-void peek_chars(FILE *file, struct GIF *gif, int n);
-int binary(int n);
-
-
-BYTE *copy;
+int bytes_count = 0;
+BYTE *gif;
 
 int main(int argc, char** argv)
 {
@@ -78,37 +89,35 @@ int main(int argc, char** argv)
   }
 
   // TODO: malloc dynamic
-  copy = malloc(300000);
+  gif = malloc(300000);
 
-  struct GIF gif = {0};
-  read_n_bytes(file, &gif, gif.Signature, sizeof(gif.Signature));
-  read_n_bytes(file, &gif, gif.Version, sizeof(gif.Version));
-  gif.ScreenWidth = read_word(file, &gif);
-  gif.ScreenHeight = read_word(file, &gif);
-  gif.Packed = read_byte(file, &gif);
-  gif.BackgroundColour = read_byte(file, &gif);
-  gif.AspectRatio = read_byte(file, &gif);
-  printf("haha: %d\n", gif.BytesCount);
+  struct Header header = {0};
+  read_n_bytes(file, header.Signature, sizeof(header.Signature));
+  read_n_bytes(file, header.Version, sizeof(header.Version));
+  header.ScreenWidth = read_word(file);
+  header.ScreenHeight = read_word(file);
+  header.Packed = read_byte(file);
+  header.BackgroundColour = read_byte(file);
+  header.AspectRatio = read_byte(file);
 
-  printf("Signature: %c%c%c", gif.Signature[0], gif.Signature[1], gif.Signature[2]);
-  printf(" | Version: %c%c%c", gif.Version[0], gif.Version[1], gif.Version[2]);
-  printf(" | ScreenWidth: %d", gif.ScreenWidth);
-  printf(" | ScreenHeight: %d", gif.ScreenHeight);
-  printf(" | Packed: %.8d", binary(gif.Packed));
-  printf(" | BackgroundColour: %d", gif.BackgroundColour);
-  printf(" | AspectRatio: %d\n", gif.AspectRatio);
+  printf("Signature: %c%c%c", header.Signature[0], header.Signature[1], header.Signature[2]);
+  printf(" | Version: %c%c%c", header.Version[0], header.Version[1], header.Version[2]);
+  printf(" | ScreenWidth: %d", header.ScreenWidth);
+  printf(" | ScreenHeight: %d", header.ScreenHeight);
+  printf(" | Packed: %.8d", binary(header.Packed));
+  printf(" | BackgroundColour: %d", header.BackgroundColour);
+  printf(" | AspectRatio: %d\n", header.AspectRatio);
 
-  int global_colour_table_count = 1L << ((gif.Packed  & 0x07) + 1);
-  gif.GlobalColourTable = malloc(global_colour_table_count * sizeof(struct ColourTable));
-
+  int global_colour_table_count = 1L << ((header.Packed  & 0x07) + 1);
+  struct ColourTable global_colour_table[global_colour_table_count];
 
   printf("\nGLOBAL COLOUR TABLE: ");
   for (int i = 0; i < global_colour_table_count; i++) {
-    gif.GlobalColourTable[i].Red = read_byte(file, &gif);
-    gif.GlobalColourTable[i].Green = read_byte(file, &gif);
-    gif.GlobalColourTable[i].Blue = read_byte(file, &gif);
+    global_colour_table[i].Red = read_byte(file);
+    global_colour_table[i].Green = read_byte(file);
+    global_colour_table[i].Blue = read_byte(file);
 
-    printf("#%.2X%.2X%.2X ", gif.GlobalColourTable[i].Red, gif.GlobalColourTable[i].Green, gif.GlobalColourTable[i].Blue);
+    printf("#%.2X%.2X%.2X ", global_colour_table[i].Red, global_colour_table[i].Green, global_colour_table[i].Blue);
   }
   printf("\n\n");
 
@@ -116,11 +125,11 @@ int main(int argc, char** argv)
   int image_count = 0;
 
   while (1) {
-    WORD (*act_word)(FILE *file, struct GIF *gif);
-    BYTE (*act_byte)(FILE *file, struct GIF *gif);
-    void (*act_n_bytes)(FILE *file, struct GIF *gif, BYTE *dest, int size);
+    WORD (*act_word)(FILE *file);
+    BYTE (*act_byte)(FILE *file);
+    void (*act_n_bytes)(FILE *file, BYTE *dest, int size);
 
-    if (1) {
+    if (image_count % 2 == 0) {
       act_word = read_word;
       act_byte = read_byte;
       act_n_bytes = read_n_bytes;
@@ -131,64 +140,64 @@ int main(int argc, char** argv)
       act_n_bytes = skip_n_bytes;
     }
 
-    BYTE byte = act_byte(file, &gif);
+    BYTE byte = act_byte(file);
     while (byte == EXTENSION) {
-      BYTE extension_label = act_byte(file, &gif);
+      BYTE extension_label = act_byte(file);
 
       switch (extension_label) {
         case APPLICATION_LABEL:
           // just skipping the bytes for now
           BYTE identifier[8];
           BYTE authentcode[3];
-          act_byte(file, &gif); // blocksize
-          act_n_bytes(file, &gif, identifier, 8); // identifier
-          act_n_bytes(file, &gif, authentcode, 3); // authentcode
+          act_byte(file); // blocksize
+          act_n_bytes(file, identifier, 8); // identifier
+          act_n_bytes(file, authentcode, 3); // authentcode
 
           // Sub-block
-          BYTE c = act_byte(file, &gif);
+          BYTE c = act_byte(file);
           while (c != 0) {
             for (int i = 0; i < c; i++) {
-              act_byte(file, &gif);
+              act_byte(file);
             }
 
-            c = act_byte(file, &gif);
+            c = act_byte(file);
           }
           break;
 
         case COMMENT_LABEL:
           // Sub-block
-          c = act_byte(file, &gif);
+          c = act_byte(file);
           while (c != 0) {
             for (int i = 0; i < c; i++) {
-              act_byte(file, &gif);
+              act_byte(file);
             }
-            c = act_byte(file, &gif);
+            c = act_byte(file);
           }
           break;
 
         case GRAPHICS_CONTROL_LABEL:
           // just skipping the bytes for now
-          act_byte(file, &gif); // blocksize
-          act_byte(file, &gif); // packed
-          printf("gfx packed: %.8u\n", binary(copy[gif.BytesCount-1]));
-          act_word(file, &gif); // delaytime
-          act_byte(file, &gif); // colorindex
-          act_byte(file, &gif); // terminator
+          act_byte(file); // blocksize
+          act_byte(file); // packed
+          printf("gfx packed: %.8u\n", binary(gif[bytes_count-1]));
+          act_word(file); // delaytime
+          act_byte(file); // colorindex
+          act_byte(file); // terminator
           break;
       }
 
-      byte = act_byte(file, &gif);
+      byte = act_byte(file);
     }
     
     if (byte == TRAILER) {
       break;
     }
 
-    images[image_count].Left = act_word(file, &gif);
-    images[image_count].Top = act_word(file, &gif);
-    images[image_count].Width = act_word(file, &gif);
-    images[image_count].Height = act_word(file, &gif);
-    images[image_count].Packed = act_byte(file, &gif);
+    images[image_count].Left = act_word(file);
+    images[image_count].Top = act_word(file);
+    images[image_count].Width = act_word(file);
+    images[image_count].Height = act_word(file);
+    images[image_count].Packed = act_byte(file);
 
     printf("Frame #%.3d: left = %.3d, top = %.3d, width = %.3d, height = %.3d, packed = %.8d\n",
         image_count, images[image_count].Left, images[image_count].Top, images[image_count].Width, images[image_count].Height, binary(images[image_count].Packed));
@@ -198,9 +207,9 @@ int main(int argc, char** argv)
 
       printf("LOCAL COLOUR TABLE: ");
       for (int i = 0; i < local_colour_table_count; i++) {
-        images[image_count].LocalColourTable[i].Red = act_byte(file, &gif);
-        images[image_count].LocalColourTable[i].Green = act_byte(file, &gif);
-        images[image_count].LocalColourTable[i].Blue = act_byte(file, &gif);
+        images[image_count].LocalColourTable[i].Red = act_byte(file);
+        images[image_count].LocalColourTable[i].Green = act_byte(file);
+        images[image_count].LocalColourTable[i].Blue = act_byte(file);
 
         if (i < 3 || i > local_colour_table_count - 3) {
           printf("%d. #%.2X%.2X%.2X ", i, images[image_count].LocalColourTable[i].Red, images[image_count].LocalColourTable[i].Green, images[image_count].LocalColourTable[i].Blue);
@@ -209,17 +218,17 @@ int main(int argc, char** argv)
     }
     printf("\n");
 
-    images[image_count].LZWMinimumCodeSize = act_byte(file, &gif);
+    images[image_count].LZWMinimumCodeSize = act_byte(file);
 
     // IMAGE DATA
-    BYTE b = act_byte(file, &gif); // count
+    BYTE b = act_byte(file); // count
     while ( b != 0) {
       // TODO: decode image data
       for (int i = 0; i < b; i++) {
-        act_byte(file, &gif);
+        act_byte(file);
       }
 
-      b = act_byte(file, &gif);
+      b = act_byte(file);
     }
 
     image_count++;
@@ -231,60 +240,59 @@ int main(int argc, char** argv)
   errno_t copy_err;
 
   copy_err = fopen_s(&copy, "copy.gif", "wb");
-  fwrite(copy, 1, gif.BytesCount, copy);
+  fwrite(gif, 1, bytes_count, copy);
   fclose(copy);
-  free(copy);
-  free(gif.GlobalColourTable);
-  printf("\nbytes count: %d\n", gif.BytesCount);
+  free(gif);
+  printf("\nbytes count: %d\n", bytes_count);
   printf("\nfile closed\n");
   return 0;
 }
 
-BYTE read_byte(FILE *file, struct GIF *gif)
+BYTE read_byte(FILE *file)
 {
   BYTE tmp;
   fread_s(&tmp, 1, 1, 1, file);
-  copy[gif->BytesCount] = tmp;
-  gif->BytesCount++;
+  gif[bytes_count] = tmp;
+  bytes_count++;
   return tmp;
 }
 
-BYTE skip_byte(FILE *file, struct GIF *gif)
+BYTE skip_byte(FILE *file)
 {
   BYTE tmp;
   fread_s(&tmp, 1, 1, 1, file);
   return tmp;
 }
 
-WORD read_word(FILE *file, struct GIF *gif)
+WORD read_word(FILE *file)
 {
-  return (read_byte(file, gif) | (read_byte(file, gif) << 8));
+  return (read_byte(file) | (read_byte(file) << 8));
 }
 
-WORD skip_word(FILE *file, struct GIF *gif)
+WORD skip_word(FILE *file)
 {
-  return (skip_byte(file, gif) | (skip_byte(file, gif) << 8));
+  return (skip_byte(file) | (skip_byte(file) << 8));
 }
 
-void read_n_bytes(FILE *file, struct GIF *gif, BYTE *dest, int size)
+void read_n_bytes(FILE *file, BYTE *dest, int size)
 {
   for (int i = 0; i < size; i++) {
-    dest[i] = read_byte(file, gif);
+    dest[i] = read_byte(file);
   }
 }
 
-void skip_n_bytes(FILE *file, struct GIF *gif, BYTE *dest, int size)
+void skip_n_bytes(FILE *file, BYTE *dest, int size)
 {
   for (int i = 0; i < size; i++) {
-    dest[i] = skip_byte(file, gif);
+    dest[i] = skip_byte(file);
   }
 }
 
-// TODO: make this independent
-void peek_chars(FILE *file, struct GIF *gif, int n)
+
+void peek_chars(FILE *file, int n)
 {
   for (int i = 0; i < n; i++) {
-    printf("%x ", read_byte(file, gif));
+    printf("%x ", read_byte(file));
   }
 }
 
